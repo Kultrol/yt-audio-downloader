@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -66,8 +67,39 @@ def inspect(url: str) -> VideoInfo:
 
 
 def download_audio(url: str, dest_dir: Path) -> Path:
-    raise NotImplementedError("download is not implemented yet")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for leftover in dest_dir.glob("audio.*"):
+        leftover.unlink()
+
+    from yt_dlp import YoutubeDL
+
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": str(dest_dir / "audio.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+    }
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if not info:
+            raise RuntimeError(f"could not download audio for {url}")
+        filename = ydl.prepare_filename(info)
+    path = Path(filename)
+    if path.exists():
+        return path
+    matches = sorted(p for p in dest_dir.glob("audio.*") if p.is_file())
+    if len(matches) != 1:
+        raise RuntimeError(f"download finished but audio file not found in {dest_dir}")
+    return matches[0]
 
 
 def save_thumbnail(url: str | None, dest: Path) -> Path | None:
-    raise NotImplementedError("thumbnail download is not implemented yet")
+    if not url:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "ytad/0.1"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        dest.write_bytes(response.read())
+    return dest

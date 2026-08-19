@@ -44,6 +44,7 @@ def test_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "init" in result.stdout
+    assert "add" in result.stdout
     assert "doctor" in result.stdout
 
 
@@ -108,13 +109,107 @@ def test_tracks_set_updates_one_track(album_dir: Path):
     assert track.start == "0:10"
 
 
-def test_download_reports_not_implemented(album_dir: Path):
+def test_download_uses_youtube_downloader(
+    album_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    called: dict[str, object] = {}
+
+    def fake_download(url: str, dest_dir: Path) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        path = dest_dir / "audio.webm"
+        path.write_bytes(b"audio")
+        called["url"] = url
+        called["path"] = path
+        return path
+
+    monkeypatch.setattr("yt_audio_downloader.cli.download_audio", fake_download)
     result = runner.invoke(app, ["download"])
-    assert result.exit_code != 0
-    assert "not implemented" in result.stdout.lower()
+    assert result.exit_code == 0, result.stdout
+    assert called["url"] == "https://www.youtube.com/watch?v=abc123def45"
+    assert (album_dir / "source" / "audio.webm").is_file()
 
 
-def test_build_reports_not_implemented(album_dir: Path):
+def test_build_missing_source(album_dir: Path):
     result = runner.invoke(app, ["build"])
     assert result.exit_code != 0
-    assert "not implemented" in result.stdout.lower()
+    assert "no downloaded audio" in result.stdout.lower()
+
+
+def test_build_exports_tracks(album_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    source = album_dir / "source"
+    source.mkdir()
+    (source / "audio.webm").write_bytes(b"audio")
+
+    def fake_split(source_audio, doc, dest_dir, cover=None):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = dest_dir / "01 - Intro.m4a"
+        out.write_bytes(b"m4a")
+        return [out]
+
+    monkeypatch.setattr("yt_audio_downloader.cli.split_and_encode", fake_split)
+    result = runner.invoke(app, ["build"])
+    assert result.exit_code == 0, result.stdout
+    assert "1 tracks" in result.stdout
+
+
+def _fake_inspect(url: str) -> VideoInfo:
+    return VideoInfo(
+        url=url,
+        video_id="abc123def45",
+        title="Some Artist - Live at Venue (2024)",
+        duration_seconds=200,
+        description="0:00 Intro\n1:23 Opening Song\n",
+        thumbnail_url=None,
+        chapters=[],
+        uploader="Some Artist",
+    )
+
+
+def test_add_yes_inits_downloads_and_builds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("YTAD_LIBRARY", str(tmp_path))
+    monkeypatch.setattr("yt_audio_downloader.cli.inspect", _fake_inspect)
+
+    def fake_download(url: str, dest_dir: Path) -> Path:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        path = dest_dir / "audio.webm"
+        path.write_bytes(b"audio")
+        return path
+
+    def fake_split(source_audio, doc, dest_dir, cover=None):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = dest_dir / "01 - Intro.m4a"
+        out.write_bytes(b"m4a")
+        return [out]
+
+    monkeypatch.setattr("yt_audio_downloader.cli.download_audio", fake_download)
+    monkeypatch.setattr("yt_audio_downloader.cli.split_and_encode", fake_split)
+    url = "https://www.youtube.com/watch?v=abc123def45"
+    result = runner.invoke(app, ["add", url, "--yes"])
+    assert result.exit_code == 0, result.stdout
+    album_path = tmp_path / "Some Artist" / "2024 - Live at Venue" / "album.json"
+    assert album_path.is_file()
+    assert "Downloaded" in result.stdout
+    assert "Wrote 1 tracks" in result.stdout
+
+
+def test_add_can_stop_before_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("YTAD_LIBRARY", str(tmp_path))
+    monkeypatch.setattr("yt_audio_downloader.cli.inspect", _fake_inspect)
+    answers = iter([False, False])
+    monkeypatch.setattr(
+        "yt_audio_downloader.cli.Confirm.ask",
+        lambda *args, **kwargs: next(answers),
+    )
+    downloaded: list[bool] = []
+    monkeypatch.setattr(
+        "yt_audio_downloader.cli.download_audio",
+        lambda *args, **kwargs: downloaded.append(True),
+    )
+    url = "https://www.youtube.com/watch?v=abc123def45"
+    result = runner.invoke(app, ["add", url])
+    assert result.exit_code == 0, result.stdout
+    assert downloaded == []
+    assert "Stopped before download" in result.stdout
+    assert (tmp_path / "Some Artist" / "2024 - Live at Venue" / "album.json").is_file()

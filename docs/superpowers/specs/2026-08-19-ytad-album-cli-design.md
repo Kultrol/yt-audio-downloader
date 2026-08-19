@@ -68,15 +68,16 @@ Pydantic (`AlbumDocument`) validates the file. Invalid timestamps raise a valida
 
 ## CLI
 
-| Command | Behavior now |
+| Command | Behavior |
 |---|---|
+| `ytad add URL` | Guided path: create album.json, optional edit, download, build. `--yes` skips prompts |
 | `ytad init URL` | yt-dlp inspect (download=False), write project + `album.json` |
 | `ytad show` | Rich panel + track table |
 | `ytad set` | Patch album fields |
 | `ytad tracks list` | Track table |
 | `ytad tracks set N` | Edit one track |
-| `ytad download` | Calls `download_audio`; currently `NotImplementedError` |
-| `ytad build` | Calls `split_and_encode`; currently `NotImplementedError` |
+| `ytad download` | yt-dlp `bestaudio` into `source/audio.<ext>` |
+| `ytad build` | Validate tracks, ffmpeg split to AAC/M4A 256k, mutagen tags + cover, write `export/` |
 | `ytad doctor` | `ffmpeg`, `ffprobe`, import `yt_dlp` |
 
 `--path DIR` selects an existing album project. Otherwise cwd must contain `album.json`.
@@ -91,8 +92,10 @@ Pydantic (`AlbumDocument`) validates the file. Invalid timestamps raise a valida
 | `config` | Library root, sanitizing, folder names |
 | `youtube` | URL check, `VideoInfo`, `inspect`, stubs for download/thumbnail |
 | `prepare` | Chapter-vs-description selection; artist/title/year guess |
-| `media` | ffmpeg split/encode stub |
-| `tags` | mutagen tagging stub |
+| `media` | ffmpeg split/encode to AAC/M4A |
+| `tags` | mutagen MP4 tags + cover |
+| `validate` | empty/overlap/duration checks before build |
+| `project` | create album folder + album.json |
 | `cli` | Typer app |
 
 ## Tracklist rules
@@ -113,11 +116,15 @@ If the YouTube title contains ` - `, the left side is artist and the right side 
 - `inspect` / `_extract_info` monkeypatched in CLI and unit tests
 - Timestamp fixtures under `tests/fixtures/descriptions/`
 
+## Pipeline
+
+- **Edit, then download, then build.** `ytad add` walks those steps so the user does not have to remember the sequence. `init` / `download` / `build` remain for manual control.
+- Download uses yt-dlp `bestaudio/best` and replaces previous `source/audio.*` files.
+- Build rejects empty tracklists and overlapping times. Gaps (applause between songs) are allowed. Track ends past the source duration fail.
+- Export files are `NN - Title.m4a` with title/artist/album/album artist/track number/date/genre and embedded cover art.
+- Thumbnail download uses the YouTube thumbnail URL; failure does not fail project creation.
+
 ## Later work
 
-- `download_audio` via yt-dlp into `source/`
-- ffmpeg split + AAC encode into `export/`
-- mutagen tags + embedded cover
-- `save_thumbnail` implementation
-- Overlap/gap validation at `build` time
-- Optional httpx only if an external metadata API is added
+- Optional httpx only if an external metadata API is added (MusicBrainz, Cover Art Archive)
+- Per-song videos / keeping the original video file

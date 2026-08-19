@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shlex
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm
 from rich.table import Table
 
 from yt_audio_downloader.albumjson import load_album, save_album
-from yt_audio_downloader.config import album_project_dir
-from yt_audio_downloader.media import split_and_encode
-from yt_audio_downloader.models import AlbumDocument, SourceInfo, Track
-from yt_audio_downloader.prepare import guess_album, select_tracks, source_duration
+from yt_audio_downloader.media import find_source_audio, split_and_encode
+from yt_audio_downloader.models import AlbumDocument, Track
+from yt_audio_downloader.project import create_album_project
+from yt_audio_downloader.validate import TracklistError
 from yt_audio_downloader.youtube import (
     NotYouTubeURLError,
     download_audio,
     inspect,
-    save_thumbnail,
 )
 
 app = typer.Typer(
@@ -44,8 +48,8 @@ def _ctx_path(ctx: typer.Context) -> Path | None:
 def resolve_album_dir(path: Path | None) -> Path:
     candidate = (path or Path.cwd()).expanduser().resolve()
     if candidate.is_file() and candidate.name == "album.json":
-        album = candidate
         parent = candidate.parent
+        album = candidate
     else:
         parent = candidate
         album = parent / "album.json"
@@ -66,13 +70,58 @@ def _track_table(tracks: list[Track]) -> Table:
     table.add_column("End")
     table.add_column("Title")
     for track in tracks:
-        table.add_row(
-            str(track.index),
-            track.start,
-            track.end or "",
-            track.title,
-        )
+        table.add_row(str(track.index), track.start, track.end or "", track.title)
     return table
+
+
+def _print_album(album_dir: Path, doc: AlbumDocument) -> None:
+    header = (
+        f"[bold]{doc.album.artist}[/bold] — {doc.album.title}\n"
+        f"Date: {doc.album.date or '—'}    Genre: {doc.album.genre}\n"
+        f"Source: {doc.source.url}\n"
+        f"Path: {album_dir}"
+    )
+    console.print(Panel(header, title="Album"))
+    console.print(_track_table(doc.tracks))
+
+
+def _inspect_url(url: str):
+    try:
+        return inspect(url)
+    except NotYouTubeURLError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _run_download(album_dir: Path, doc: AlbumDocument) -> Path:
+    console.print("Downloading audio…")
+    path = download_audio(doc.source.url, album_dir / "source")
+    console.print(f"Downloaded [bold]{path}[/bold]")
+    return path
+
+
+def _run_build(album_dir: Path, doc: AlbumDocument) -> list[Path]:
+    try:
+        source = find_source_audio(album_dir / "source")
+        paths = split_and_encode(source, doc, album_dir / "export")
+    except (TracklistError, FileNotFoundError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    export = album_dir / "export"
+    console.print(f"Wrote {len(paths)} tracks to [bold]{export}[/bold]")
+    return paths
+
+
+def _edit_album_json(path: Path) -> None:
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if editor:
+        subprocess.run([*shlex.split(editor), str(path)], check=False)
+        return
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-t", str(path)], check=False)
+    else:
+        console.print(f"Edit [bold]{path}[/bold] in your editor.")
+    Confirm.ask("Press Enter when you have saved album.json", default=True)
 
 
 @app.callback()
@@ -110,63 +159,70 @@ def doctor() -> None:
 
 
 @app.command()
+def add(
+    url: str,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip prompts; download and build after creating album.json.",
+    ),
+) -> None:
+    """Create an album, let you edit metadata, then download and build."""
+    info = _inspect_url(url)
+    dest = create_album_project(info)
+    doc = load_album(dest / "album.json")
+    console.print(f"Created album project at [bold]{dest}[/bold]")
+    _print_album(dest, doc)
+    if not doc.tracks:
+        console.print(
+            "[yellow]No chapters or description timestamps found. "
+            "Add tracks in album.json before building.[/yellow]"
+        )
+
+    if not yes:
+        if Confirm.ask("Edit album.json before downloading?", default=True):
+            _edit_album_json(dest / "album.json")
+            doc = load_album(dest / "album.json")
+            _print_album(dest, doc)
+        if not Confirm.ask("Download audio now?", default=True):
+            console.print("Stopped before download. Later: `cd` here and run `ytad download`.")
+            return
+
+    doc = load_album(dest / "album.json")
+    _run_download(dest, doc)
+
+    if not yes:
+        if not Confirm.ask("Build tagged M4A album now?", default=True):
+            console.print("Stopped before build. Later: run `ytad build`.")
+            return
+
+    doc = load_album(dest / "album.json")
+    _run_build(dest, doc)
+
+
+@app.command()
 def init(url: str) -> None:
     """Fetch YouTube metadata and create an album project folder."""
-    try:
-        info = inspect(url)
-    except NotYouTubeURLError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    album = guess_album(info)
-    tracks = select_tracks(info)
-    dest = album_project_dir(artist=album.artist, date=album.date, title=album.title)
-    if dest.exists():
-        dest = dest.with_name(f"{dest.name}-{info.video_id}")
-    dest.mkdir(parents=True, exist_ok=True)
-    (dest / "source").mkdir(exist_ok=True)
-    (dest / "export").mkdir(exist_ok=True)
-
-    doc = AlbumDocument(
-        source=SourceInfo(
-            url=info.url,
-            video_id=info.video_id,
-            title=info.title,
-            duration=source_duration(info),
-            thumbnail_url=info.thumbnail_url,
-        ),
-        album=album,
-        tracks=tracks,
-    )
-    save_album(dest / "album.json", doc)
-
-    try:
-        save_thumbnail(info.thumbnail_url, dest / "cover.jpg")
-    except NotImplementedError:
-        pass
-
+    info = _inspect_url(url)
+    dest = create_album_project(info)
+    doc = load_album(dest / "album.json")
     console.print(f"Created album project at [bold]{dest}[/bold]")
-    console.print(f"Tracks: {len(tracks)}")
-    if not tracks:
+    console.print(f"Tracks: {len(doc.tracks)}")
+    if not doc.tracks:
         console.print(
             "[yellow]No chapters or description timestamps found. "
             "Edit album.json or run `ytad tracks set` to add them.[/yellow]"
         )
-    console.print(f"Next: cd {dest!s} && ytad show")
+    console.print(f"Next: cd {dest} && ytad show")
+    console.print("Or start over with `ytad add URL` to be walked through edit, download, and build.")
 
 
 @app.command()
 def show(ctx: typer.Context) -> None:
     """Pretty-print album.json."""
     album_dir, doc = _load(ctx)
-    header = (
-        f"[bold]{doc.album.artist}[/bold] — {doc.album.title}\n"
-        f"Date: {doc.album.date or '—'}    Genre: {doc.album.genre}\n"
-        f"Source: {doc.source.url}\n"
-        f"Path: {album_dir}"
-    )
-    console.print(Panel(header, title="Album"))
-    console.print(_track_table(doc.tracks))
+    _print_album(album_dir, doc)
 
 
 @app.command("set")
@@ -203,26 +259,16 @@ def set_album(
 
 @app.command()
 def download(ctx: typer.Context) -> None:
-    """Download audio for the current album (not implemented yet)."""
+    """Download audio for the current album into source/."""
     album_dir, doc = _load(ctx)
-    try:
-        download_audio(doc.source.url, album_dir / "source")
-    except NotImplementedError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
+    _run_download(album_dir, doc)
 
 
 @app.command()
 def build(ctx: typer.Context) -> None:
-    """Split, encode, and export tagged tracks (not implemented yet)."""
+    """Split, encode AAC/M4A, tag, and write export/."""
     album_dir, doc = _load(ctx)
-    source_dir = album_dir / "source"
-    source_audio = next(source_dir.glob("*"), source_dir / "audio")
-    try:
-        split_and_encode(source_audio, doc, album_dir / "export")
-    except NotImplementedError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
+    _run_build(album_dir, doc)
 
 
 @tracks_app.command("list")

@@ -1,10 +1,14 @@
 import pytest
 
+from pathlib import Path
+
 from yt_audio_downloader.youtube import (
     NotYouTubeURLError,
     VideoInfo,
+    download_audio,
     inspect,
     is_youtube_url,
+    save_thumbnail,
 )
 
 
@@ -41,3 +45,61 @@ def test_inspect_uses_extractor(monkeypatch):
     info = inspect("https://www.youtube.com/watch?v=abc")
     assert info.video_id == "abc"
     assert info.chapters[1]["title"] == "Song"
+
+
+class FakeYDL:
+    def __init__(self, opts):
+        self.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def extract_info(self, url, download=True):
+        dest = Path(self.opts["outtmpl"].replace("%(ext)s", "webm"))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"audio-bytes")
+        return {"ext": "webm"}
+
+    def prepare_filename(self, info):
+        return self.opts["outtmpl"].replace("%(ext)s", info["ext"])
+
+
+def test_download_audio_writes_source_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYDL)
+    dest = tmp_path / "source"
+    leftover = dest / "audio.m4a"
+    leftover.parent.mkdir()
+    leftover.write_bytes(b"old")
+    path = download_audio("https://www.youtube.com/watch?v=abc", dest)
+    assert path == dest / "audio.webm"
+    assert path.read_bytes() == b"audio-bytes"
+    assert not leftover.exists()
+
+
+def test_save_thumbnail_writes_cover(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"\xff\xd8cover"
+
+    monkeypatch.setattr(
+        "yt_audio_downloader.youtube.urllib.request.urlopen",
+        lambda req, timeout=30: FakeResp(),
+    )
+    dest = tmp_path / "cover.jpg"
+    result = save_thumbnail("https://i.ytimg.com/vi/abc/maxresdefault.jpg", dest)
+    assert result == dest
+    assert dest.read_bytes() == b"\xff\xd8cover"
+
+
+def test_save_thumbnail_skips_missing_url(tmp_path: Path):
+    assert save_thumbnail(None, tmp_path / "cover.jpg") is None
+    assert not (tmp_path / "cover.jpg").exists()
