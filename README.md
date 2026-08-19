@@ -2,7 +2,7 @@
 
 Turn a YouTube concert or live-set URL into a tagged M4A album you can add to Apple Music or Spotify Local Files.
 
-`ytad` fetches metadata with [yt-dlp](https://github.com/yt-dlp/yt-dlp), guesses artist/title/year, and builds a tracklist from video chapters or timestamps in the description. You fix mistakes in `album.json` (or via CLI commands). Then it downloads audio, splits with ffmpeg, and writes tagged AAC/M4A files.
+`ytad` fetches metadata with [yt-dlp](https://github.com/yt-dlp/yt-dlp), guesses artist/title/year, and builds a tracklist from video chapters or timestamps in the description. If neither exists, it treats the whole video as one track. You fix mistakes in `album.json` (or via CLI commands). Then it downloads audio, splits with ffmpeg, and writes tagged AAC/M4A files.
 
 Use this only on videos you have the right to download. You are responsible for complying with YouTube's terms and copyright law.
 
@@ -11,6 +11,7 @@ Use this only on videos you have the right to download. You are responsible for 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
 - `ffmpeg` and `ffprobe` on `PATH`
+- Node.js or Deno on `PATH` (YouTube challenge solving; `ytad doctor` checks this)
 
 ## Install
 
@@ -81,10 +82,18 @@ Import `export/`, not `source/`.
 | `ytad show` | Print album and tracks |
 | `ytad set` | Patch album title/artist/date/genre |
 | `ytad tracks list` | Track table |
+| `ytad tracks add` | Append a track |
 | `ytad tracks set N` | Edit one track |
 | `ytad download` | Download best audio into `source/` |
 | `ytad build` | Split, encode, tag, write `export/` |
-| `ytad doctor` | Check `ffmpeg`, `ffprobe`, `yt-dlp` |
+| `ytad doctor` | Check `ffmpeg`, `ffprobe`, `yt-dlp`, Node/Deno |
+
+## Planned
+
+These are not built yet:
+
+- **URL queue** — pass several YouTube links in one session and process them one after another
+- **Album from multiple URLs** — combine separate videos into a single album (for example five song URLs that become tracks 1–5 under one `album.json`)
 
 ## Tests
 

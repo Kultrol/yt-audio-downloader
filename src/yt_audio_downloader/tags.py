@@ -20,6 +20,12 @@ def write_tags(path: Path, doc: AlbumDocument, track: Track, cover: Path | None)
         audio["\xa9gen"] = [doc.album.genre]
     if cover is not None and cover.is_file():
         data = cover.read_bytes()
-        fmt = MP4Cover.FORMAT_PNG if cover.suffix.lower() == ".png" else MP4Cover.FORMAT_JPEG
-        audio["covr"] = [MP4Cover(data, imageformat=fmt)]
+        if data.startswith(b"\x89PNG"):
+            fmt = MP4Cover.FORMAT_PNG
+        elif data.startswith(b"\xff\xd8"):
+            fmt = MP4Cover.FORMAT_JPEG
+        else:
+            fmt = None
+        if fmt is not None:
+            audio["covr"] = [MP4Cover(data, imageformat=fmt)]
     audio.save()

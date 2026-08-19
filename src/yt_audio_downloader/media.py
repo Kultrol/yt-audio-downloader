@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from yt_audio_downloader.config import sanitize_name
@@ -31,6 +32,7 @@ def split_and_encode(
     doc: AlbumDocument,
     dest_dir: Path,
     cover: Path | None = None,
+    on_track: Callable[[int, int, str], None] | None = None,
 ) -> list[Path]:
     validate_tracks(doc)
     if not source_audio.is_file():
@@ -50,7 +52,11 @@ def split_and_encode(
         cover_path = None
 
     outputs: list[Path] = []
-    for track in sorted(doc.tracks, key=lambda item: item.index):
+    tracks = sorted(doc.tracks, key=lambda item: item.index)
+    total = len(tracks)
+    for track in tracks:
+        if on_track is not None:
+            on_track(track.index, total, track.title)
         start, end = track_span(track, duration)
         filename = f"{track.index:02d} - {sanitize_name(track.title)}.m4a"
         output = dest_dir / filename

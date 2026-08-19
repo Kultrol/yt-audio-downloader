@@ -14,6 +14,20 @@ from yt_audio_downloader.youtube import VideoInfo
 _YEAR = re.compile(r"\b((?:19|20)\d{2})\b")
 
 
+def _title_parts(title: str) -> tuple[str | None, str]:
+    """Artist guessed from the title (if any) and remaining album/song title."""
+    stripped = title.strip()
+    if " - " in stripped:
+        left, right = stripped.split(" - ", 1)
+        if left.strip() and right.strip():
+            return left.strip(), right.strip()
+    if " | " in stripped:
+        first, _, _rest = stripped.partition(" | ")
+        if first.strip():
+            return None, first.strip()
+    return None, stripped
+
+
 def select_tracks(info: VideoInfo) -> list[Track]:
     duration = info.duration_seconds
     if info.chapters:
@@ -21,18 +35,16 @@ def select_tracks(info: VideoInfo) -> list[Track]:
     pairs = parse_description_timestamps(info.description)
     if pairs:
         return tracks_from_timed_titles(pairs, duration)
-    return []
+    album = guess_album(info)
+    return tracks_from_timed_titles([(0.0, album.title)], duration)
 
 
 def guess_album(info: VideoInfo) -> AlbumInfo:
     title = info.title.strip()
     artist = info.uploader.strip() or "Unknown Artist"
-    rest = title
-    if " - " in title:
-        left, right = title.split(" - ", 1)
-        if left.strip():
-            artist = left.strip()
-            rest = right.strip()
+    artist_from_title, rest = _title_parts(title)
+    if artist_from_title:
+        artist = artist_from_title
     year_match = _YEAR.search(title)
     date = year_match.group(1) if year_match else None
     album_title = rest

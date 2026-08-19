@@ -17,7 +17,7 @@ This document records the product decisions and the scaffolding that is implemen
 | Corrections | `album.json` is source of truth; CLI can edit it | Easy to fix titles and timestamps in an editor |
 | Persistence | Per-album folder + JSON | Matches the edit-a-file workflow. SQLite is worse for hand-editing; a derived index can wait |
 | Sites | YouTube only | Project name and v1 scope. yt-dlp is the YouTube interface |
-| Tracklist | Chapters, else description timestamps, else empty | "Take care of the rest" without guessing setlists |
+| Tracklist | Chapters, else description timestamps, else one full-duration track | Concerts split when YouTube gives times; a single music video becomes one song |
 | Export codec (later) | AAC/M4A | Works for both Apple Music and Spotify Local Files. YouTube audio is already lossy, so FLAC would be fake lossless |
 | HTTP / gRPC | No httpx, no gRPC | yt-dlp already talks to YouTube. Revisit httpx only if we add MusicBrainz or Cover Art Archive |
 
@@ -75,8 +75,9 @@ Pydantic (`AlbumDocument`) validates the file. Invalid timestamps raise a valida
 | `ytad show` | Rich panel + track table |
 | `ytad set` | Patch album fields |
 | `ytad tracks list` | Track table |
+| `ytad tracks add` | Append a track |
 | `ytad tracks set N` | Edit one track |
-| `ytad download` | yt-dlp `bestaudio` into `source/audio.<ext>` |
+| `ytad download` | yt-dlp `bestaudio` via `web_embedded` (fallback `android`), Node EJS, IPv4 |
 | `ytad build` | Validate tracks, ffmpeg split to AAC/M4A 256k, mutagen tags + cover, write `export/` |
 | `ytad doctor` | `ffmpeg`, `ffprobe`, import `yt_dlp` |
 
@@ -102,13 +103,13 @@ Pydantic (`AlbumDocument`) validates the file. Invalid timestamps raise a valida
 
 1. If yt-dlp returns chapters, use them.
 2. Else parse description lines that start with a timestamp (`0:00 Title`, `1:12:05 Encore`, optional bullets/`-`). Require at least two hits so prose like "see you at 8:00" is ignored.
-3. Else empty tracklist; `init` warns. The user fills timestamps by editing JSON or `ytad tracks set`.
+3. Else one track covering `0:00` through the video duration, titled from the guessed album/song name.
 
 Last track `end` is the video duration. Other ends are the next track's start.
 
 ## Metadata guess
 
-If the YouTube title contains ` - `, the left side is artist and the right side is album title. A 19xx/20xx year in the title becomes `album.date`. Parenthetical years are stripped from the album title. Uploader is the artist fallback. Users are expected to correct this.
+If the YouTube title contains ` - `, the left side is artist and the right side is album title. If it contains ` | ` instead, the first segment is the album/song title and the uploader stays the artist (covers titles like `The Rain Song | Led Zeppelin | David Barrett`). A 19xx/20xx year in the title becomes `album.date`. Parenthetical years are stripped from the album title. Uploader is the artist fallback. Users are expected to correct this.
 
 ## Testing
 
@@ -119,7 +120,7 @@ If the YouTube title contains ` - `, the left side is artist and the right side 
 ## Pipeline
 
 - **Edit, then download, then build.** `ytad add` walks those steps so the user does not have to remember the sequence. `init` / `download` / `build` remain for manual control.
-- Download uses yt-dlp `bestaudio/best` and replaces previous `source/audio.*` files.
+- Download uses yt-dlp `bestaudio/best` with player client `web_embedded` (fallback `android`), Node JS runtime, remote EJS from GitHub, and IPv4 (`source_address=0.0.0.0`). It replaces previous `source/audio.*` files. Download failures print the yt-dlp error line without a traceback.
 - Build rejects empty tracklists and overlapping times. Gaps (applause between songs) are allowed. Track ends past the source duration fail.
 - Export files are `NN - Title.m4a` with title/artist/album/album artist/track number/date/genre and embedded cover art.
 - Thumbnail download uses the YouTube thumbnail URL; failure does not fail project creation.

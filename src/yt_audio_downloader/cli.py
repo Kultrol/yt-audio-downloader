@@ -9,17 +9,18 @@ import sys
 from pathlib import Path
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.table import Table
 
+from yt_audio_downloader import ui
 from yt_audio_downloader.albumjson import load_album, save_album
 from yt_audio_downloader.media import find_source_audio, split_and_encode
 from yt_audio_downloader.models import AlbumDocument, Track
 from yt_audio_downloader.project import create_album_project
 from yt_audio_downloader.validate import TracklistError
 from yt_audio_downloader.youtube import (
+    DownloadFailed,
     NotYouTubeURLError,
     download_audio,
     inspect,
@@ -31,8 +32,6 @@ app = typer.Typer(
 )
 tracks_app = typer.Typer(no_args_is_help=True, help="List and edit tracks in album.json.")
 app.add_typer(tracks_app, name="tracks")
-
-console = Console()
 
 
 def _ctx_path(ctx: typer.Context) -> Path | None:
@@ -81,34 +80,77 @@ def _print_album(album_dir: Path, doc: AlbumDocument) -> None:
         f"Source: {doc.source.url}\n"
         f"Path: {album_dir}"
     )
-    console.print(Panel(header, title="Album"))
-    console.print(_track_table(doc.tracks))
+    ui.console.print(Panel(header, title="Album"))
+    ui.console.print(_track_table(doc.tracks))
+
+
+def _verbose(ctx: typer.Context) -> bool:
+    obj = ctx.obj if isinstance(ctx.obj, dict) else {}
+    return bool(obj.get("verbose"))
 
 
 def _inspect_url(url: str):
     try:
-        return inspect(url)
+        with ui.console.status("[cyan]Fetching video info…[/cyan]", spinner="dots"):
+            return inspect(url)
     except NotYouTubeURLError as exc:
-        console.print(f"[red]{exc}[/red]")
+        ui.error(str(exc))
         raise typer.Exit(1) from exc
 
 
-def _run_download(album_dir: Path, doc: AlbumDocument) -> Path:
-    console.print("Downloading audio…")
-    path = download_audio(doc.source.url, album_dir / "source")
-    console.print(f"Downloaded [bold]{path}[/bold]")
+def _run_download(album_dir: Path, doc: AlbumDocument, *, verbose: bool = False) -> Path:
+    try:
+        with ui.download_progress() as progress:
+            task = progress.add_task("Download", total=None)
+
+            def hook(event: dict) -> None:
+                status = event.get("status")
+                if status == "downloading":
+                    total = event.get("total_bytes") or event.get("total_bytes_estimate")
+                    done = event.get("downloaded_bytes") or 0
+                    if total:
+                        progress.update(task, total=total, completed=done)
+                    else:
+                        progress.update(task, completed=done)
+                elif status == "finished":
+                    total = event.get("total_bytes") or progress.tasks[0].total
+                    if total:
+                        progress.update(task, total=total, completed=total)
+
+            path = download_audio(
+                doc.source.url,
+                album_dir / "source",
+                on_progress=None if verbose else hook,
+                verbose=verbose,
+            )
+    except DownloadFailed as exc:
+        ui.error(str(exc))
+        raise typer.Exit(1) from exc
+    ui.ok(f"Downloaded {path.name}")
     return path
 
 
 def _run_build(album_dir: Path, doc: AlbumDocument) -> list[Path]:
+    export = album_dir / "export"
     try:
         source = find_source_audio(album_dir / "source")
-        paths = split_and_encode(source, doc, album_dir / "export")
+        with ui.track_progress() as progress:
+            task = progress.add_task("Encode", total=max(len(doc.tracks), 1))
+
+            def on_track(index: int, total: int, title: str) -> None:
+                progress.update(
+                    task,
+                    total=total,
+                    completed=index - 1,
+                    description=f"Encode  {title}",
+                )
+
+            paths = split_and_encode(source, doc, export, on_track=on_track)
+            progress.update(task, completed=len(paths), description="Encode")
     except (TracklistError, FileNotFoundError, RuntimeError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        ui.error(str(exc))
         raise typer.Exit(1) from exc
-    export = album_dir / "export"
-    console.print(f"Wrote {len(paths)} tracks to [bold]{export}[/bold]")
+    ui.ok(f"Wrote {len(paths)} tracks to {export}")
     return paths
 
 
@@ -120,7 +162,7 @@ def _edit_album_json(path: Path) -> None:
     if sys.platform == "darwin":
         subprocess.run(["open", "-t", str(path)], check=False)
     else:
-        console.print(f"Edit [bold]{path}[/bold] in your editor.")
+        ui.info(f"Edit {path} in your editor.")
     Confirm.ask("Press Enter when you have saved album.json", default=True)
 
 
@@ -132,9 +174,16 @@ def main(
         "--path",
         help="Album project directory (must contain album.json).",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show yt-dlp logs instead of a progress bar.",
+    ),
 ) -> None:
     ctx.ensure_object(dict)
     ctx.obj["path"] = path
+    ctx.obj["verbose"] = verbose
 
 
 @app.command()
@@ -152,14 +201,22 @@ def doctor() -> None:
     for name, present in checks:
         if not present:
             missing = True
-        table.add_row(name, "ok" if present else "MISSING")
-    console.print(table)
+        table.add_row(name, "[green]ok[/green]" if present else "[red bold]MISSING[/red bold]")
+    js_runtime = shutil.which("node") or shutil.which("deno")
+    table.add_row(
+        "js runtime (node/deno)",
+        "[green]ok[/green]" if js_runtime else "[red bold]MISSING[/red bold]",
+    )
+    ui.console.print(table)
+    if not js_runtime:
+        ui.warn("YouTube downloads need Node or Deno to solve player challenges.")
     if missing:
         raise typer.Exit(1)
 
 
 @app.command()
 def add(
+    ctx: typer.Context,
     url: str,
     yes: bool = typer.Option(
         False,
@@ -172,12 +229,12 @@ def add(
     info = _inspect_url(url)
     dest = create_album_project(info)
     doc = load_album(dest / "album.json")
-    console.print(f"Created album project at [bold]{dest}[/bold]")
+    ui.ok(f"Created album project at {dest}")
     _print_album(dest, doc)
     if not doc.tracks:
-        console.print(
-            "[yellow]No chapters or description timestamps found. "
-            "Add tracks in album.json before building.[/yellow]"
+        ui.warn(
+            "No chapters or description timestamps found. "
+            "Add tracks in album.json before building."
         )
 
     if not yes:
@@ -186,15 +243,15 @@ def add(
             doc = load_album(dest / "album.json")
             _print_album(dest, doc)
         if not Confirm.ask("Download audio now?", default=True):
-            console.print("Stopped before download. Later: `cd` here and run `ytad download`.")
+            ui.info("Stopped before download. Later: `cd` here and run `ytad download`.")
             return
 
     doc = load_album(dest / "album.json")
-    _run_download(dest, doc)
+    _run_download(dest, doc, verbose=_verbose(ctx))
 
     if not yes:
         if not Confirm.ask("Build tagged M4A album now?", default=True):
-            console.print("Stopped before build. Later: run `ytad build`.")
+            ui.info("Stopped before build. Later: run `ytad build`.")
             return
 
     doc = load_album(dest / "album.json")
@@ -207,15 +264,15 @@ def init(url: str) -> None:
     info = _inspect_url(url)
     dest = create_album_project(info)
     doc = load_album(dest / "album.json")
-    console.print(f"Created album project at [bold]{dest}[/bold]")
-    console.print(f"Tracks: {len(doc.tracks)}")
+    ui.ok(f"Created album project at {dest}")
+    ui.info(f"Tracks: {len(doc.tracks)}")
     if not doc.tracks:
-        console.print(
-            "[yellow]No chapters or description timestamps found. "
-            "Edit album.json or run `ytad tracks set` to add them.[/yellow]"
+        ui.warn(
+            "No chapters or description timestamps found. "
+            "Edit album.json or run `ytad tracks set` to add them."
         )
-    console.print(f"Next: cd {dest} && ytad show")
-    console.print("Or start over with `ytad add URL` to be walked through edit, download, and build.")
+    ui.info(f"Next: cd {dest} && ytad show")
+    ui.info("Or start over with `ytad add URL` to be walked through edit, download, and build.")
 
 
 @app.command()
@@ -250,18 +307,18 @@ def set_album(
             data[key] = value
             changed = True
     if not changed:
-        console.print("[yellow]No fields provided. Nothing changed.[/yellow]")
+        ui.warn("No fields provided. Nothing changed.")
         return
     doc.album = type(doc.album).model_validate(data)
     save_album(album_dir / "album.json", doc)
-    console.print(f"Updated {album_dir / 'album.json'}")
+    ui.ok(f"Updated {album_dir / 'album.json'}")
 
 
 @app.command()
 def download(ctx: typer.Context) -> None:
     """Download audio for the current album into source/."""
     album_dir, doc = _load(ctx)
-    _run_download(album_dir, doc)
+    _run_download(album_dir, doc, verbose=_verbose(ctx))
 
 
 @app.command()
@@ -275,7 +332,22 @@ def build(ctx: typer.Context) -> None:
 def tracks_list(ctx: typer.Context) -> None:
     """List tracks from album.json."""
     _, doc = _load(ctx)
-    console.print(_track_table(doc.tracks))
+    ui.console.print(_track_table(doc.tracks))
+
+
+@tracks_app.command("add")
+def tracks_add(
+    ctx: typer.Context,
+    title: str = typer.Option(..., "--title"),
+    start: str = typer.Option(..., "--start"),
+    end: str | None = typer.Option(None, "--end"),
+) -> None:
+    """Append a track to album.json."""
+    album_dir, doc = _load(ctx)
+    next_index = max((item.index for item in doc.tracks), default=0) + 1
+    doc.tracks.append(Track(index=next_index, title=title, start=start, end=end))
+    save_album(album_dir / "album.json", doc)
+    ui.ok(f"Added track {next_index}: {title}")
 
 
 @tracks_app.command("set")
@@ -290,7 +362,7 @@ def tracks_set(
     album_dir, doc = _load(ctx)
     track = next((item for item in doc.tracks if item.index == index), None)
     if track is None:
-        console.print(f"[red]No track with index {index}[/red]")
+        ui.error(f"No track with index {index}")
         raise typer.Exit(1)
     data = track.model_dump()
     if title is not None:
@@ -302,4 +374,4 @@ def tracks_set(
     updated = Track.model_validate(data)
     doc.tracks = [updated if item.index == index else item for item in doc.tracks]
     save_album(album_dir / "album.json", doc)
-    console.print(f"Updated track {index}")
+    ui.ok(f"Updated track {index}")

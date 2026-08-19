@@ -23,6 +23,22 @@ def test_split_and_encode_writes_tagged_tracks(tmp_path: Path):
     assert (dest / "cover.jpg").is_file()
 
 
+def test_split_and_encode_calls_on_track(tmp_path: Path):
+    source = write_silent_m4a(tmp_path / "source" / "audio.m4a", seconds=6)
+    write_cover_jpg(tmp_path / "cover.jpg")
+    seen: list[tuple[int, int, str]] = []
+    split_and_encode(
+        source,
+        sample_doc(),
+        tmp_path / "export",
+        on_track=lambda i, n, title: seen.append((i, n, title)),
+    )
+    assert seen[0][0] == 1
+    assert seen[-1][0] == 2
+    assert seen[0][1] == 2
+    assert seen[0][2] == "Intro"
+
+
 def test_split_and_encode_rejects_empty_tracks(tmp_path: Path):
     source = write_silent_m4a(tmp_path / "audio.m4a", seconds=1)
     doc = sample_doc()

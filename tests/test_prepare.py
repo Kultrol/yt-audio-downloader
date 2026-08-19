@@ -36,9 +36,23 @@ def test_select_tracks_falls_back_to_description():
     assert tracks[-1].end == "8:20"
 
 
-def test_select_tracks_empty_when_no_chapters_or_list():
-    info = _info(description="just a concert vlog with no times")
-    assert select_tracks(info) == []
+def test_select_tracks_defaults_to_full_duration_when_no_timestamps():
+    info = _info(description="just a concert vlog with no times", duration_seconds=288)
+    tracks = select_tracks(info)
+    assert len(tracks) == 1
+    assert tracks[0].start == "0:00"
+    assert tracks[0].end == "4:48"
+    assert tracks[0].title
+
+
+def test_guess_album_splits_on_pipe():
+    info = _info(
+        title="The Rain Song | Led Zeppelin | David Barrett",
+        uploader="David Barrett Trio",
+    )
+    album = guess_album(info)
+    assert album.artist == "David Barrett Trio"
+    assert album.title == "The Rain Song"
 
 
 def test_guess_album_splits_artist_and_year():

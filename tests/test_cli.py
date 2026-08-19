@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 from yt_audio_downloader.albumjson import load_album, save_album
 from yt_audio_downloader.cli import app
 from yt_audio_downloader.models import AlbumDocument, AlbumInfo, SourceInfo, Track
-from yt_audio_downloader.youtube import VideoInfo
+from yt_audio_downloader.youtube import DownloadFailed, VideoInfo
 
 runner = CliRunner()
 
@@ -46,6 +46,7 @@ def test_help():
     assert "init" in result.stdout
     assert "add" in result.stdout
     assert "doctor" in result.stdout
+    assert "--verbose" in result.stdout or "-v" in result.stdout
 
 
 def test_doctor_runs():
@@ -53,6 +54,7 @@ def test_doctor_runs():
     assert result.exit_code in (0, 1)
     combined = result.stdout.lower()
     assert "ffmpeg" in combined or "yt-dlp" in combined or "yt_dlp" in combined
+    assert "node" in combined or "deno" in combined or "js runtime" in combined
 
 
 def test_init_writes_album_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -109,12 +111,36 @@ def test_tracks_set_updates_one_track(album_dir: Path):
     assert track.start == "0:10"
 
 
+def test_download_reports_failure_without_traceback(
+    album_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def boom(url: str, dest_dir: Path, **kwargs) -> Path:
+        raise DownloadFailed("HTTP Error 403: Forbidden")
+
+    monkeypatch.setattr("yt_audio_downloader.cli.download_audio", boom)
+    result = runner.invoke(app, ["download"])
+    assert result.exit_code != 0
+    assert "403" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_tracks_add_appends_track(album_dir: Path):
+    result = runner.invoke(
+        app, ["tracks", "add", "--title", "Encore", "--start", "3:20", "--end", "4:00"]
+    )
+    assert result.exit_code == 0, result.stdout
+    tracks = load_album(album_dir / "album.json").tracks
+    assert tracks[-1].title == "Encore"
+    assert tracks[-1].index == 3
+    assert tracks[-1].start == "3:20"
+
+
 def test_download_uses_youtube_downloader(
     album_dir: Path, monkeypatch: pytest.MonkeyPatch
 ):
     called: dict[str, object] = {}
 
-    def fake_download(url: str, dest_dir: Path) -> Path:
+    def fake_download(url: str, dest_dir: Path, **kwargs) -> Path:
         dest_dir.mkdir(parents=True, exist_ok=True)
         path = dest_dir / "audio.webm"
         path.write_bytes(b"audio")
@@ -140,7 +166,7 @@ def test_build_exports_tracks(album_dir: Path, monkeypatch: pytest.MonkeyPatch):
     source.mkdir()
     (source / "audio.webm").write_bytes(b"audio")
 
-    def fake_split(source_audio, doc, dest_dir, cover=None):
+    def fake_split(source_audio, doc, dest_dir, cover=None, on_track=None):
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = dest_dir / "01 - Intro.m4a"
         out.write_bytes(b"m4a")
@@ -171,13 +197,13 @@ def test_add_yes_inits_downloads_and_builds(
     monkeypatch.setenv("YTAD_LIBRARY", str(tmp_path))
     monkeypatch.setattr("yt_audio_downloader.cli.inspect", _fake_inspect)
 
-    def fake_download(url: str, dest_dir: Path) -> Path:
+    def fake_download(url: str, dest_dir: Path, **kwargs) -> Path:
         dest_dir.mkdir(parents=True, exist_ok=True)
         path = dest_dir / "audio.webm"
         path.write_bytes(b"audio")
         return path
 
-    def fake_split(source_audio, doc, dest_dir, cover=None):
+    def fake_split(source_audio, doc, dest_dir, cover=None, on_track=None):
         dest_dir.mkdir(parents=True, exist_ok=True)
         out = dest_dir / "01 - Intro.m4a"
         out.write_bytes(b"m4a")
